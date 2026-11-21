@@ -24,6 +24,7 @@ DROP FUNCTION IF EXISTS Calculate_TDS;
 DROP FUNCTION IF EXISTS Get_Due_Date;
 DROP FUNCTION IF EXISTS Get_Financial_Year;
 DROP FUNCTION IF EXISTS Calculate_Interest;
+DROP FUNCTION IF EXISTS Calculate_Bill_Interest;
 DROP FUNCTION IF EXISTS Get_Outstanding;
 DROP FUNCTION IF EXISTS Total_GST_Due;
 DROP FUNCTION IF EXISTS Compliance_Status;
@@ -166,6 +167,8 @@ END //
 -- ---------------------------------------------------------------------
 -- 9. Calculate_Interest(100000, '2025-11-20', '2025-12-20') -> 1479.45
 --    Sec 50 CGST Act: 18% per year, counted per day after the due date.
+--    Simple formula for ONE amount over ONE period (used for quick estimates;
+--    bills use Calculate_Bill_Interest below, which follows payment dates).
 --    interest = outstanding x 18/100 x days_late / 365
 -- ---------------------------------------------------------------------
 CREATE FUNCTION Calculate_Interest(p_outstanding DECIMAL(15,2),
@@ -180,6 +183,78 @@ BEGIN
         RETURN 0;
     END IF;
     RETURN ROUND(p_outstanding * 18 / 100 * v_days / 365, 2);
+END //
+
+-- ---------------------------------------------------------------------
+-- 9b. Calculate_Bill_Interest(tax_id, as_of) -> exact interest on ONE bill
+--     Follows the real payment dates, because a part-payment stops
+--     interest on that part from the day it is paid.
+--     Example: Rs 27,000 due 20 Nov, Rs 13,500 paid 25 Nov, checked 30 Nov
+--        20->25 Nov: 27,000 x 18% x 5/365 = 66.58
+--        25->30 Nov: 13,500 x 18% x 5/365 = 33.29   -> total 99.86
+--     Only VERIFIED payments count. Payments made before the due date
+--     just reduce the amount; interest starts only after the due date.
+--     Uses a CURSOR: a pointer that walks through query rows one by one.
+-- ---------------------------------------------------------------------
+CREATE FUNCTION Calculate_Bill_Interest(p_tax_id INT, p_as_of DATE)
+RETURNS DECIMAL(15,2)
+READS SQL DATA
+BEGIN
+    DECLARE v_tax_due     DECIMAL(15,2);
+    DECLARE v_due_date    DATE;
+    DECLARE v_paid        DECIMAL(15,2) DEFAULT 0;   -- paid so far
+    DECLARE v_from        DATE;                      -- start of current interest period
+    DECLARE v_interest    DECIMAL(20,6) DEFAULT 0;   -- extra decimals, rounded at the end
+    DECLARE v_pay_date    DATE;
+    DECLARE v_pay_amount  DECIMAL(15,2);
+    DECLARE v_done        BOOLEAN DEFAULT FALSE;
+
+    -- the cursor: verified payments of this bill, oldest first
+    DECLARE pay_cursor CURSOR FOR
+        SELECT Payment_Date, Amount
+        FROM payment
+        WHERE Tax_ID = p_tax_id
+          AND Status = 'Verified'
+          AND Payment_Date <= p_as_of
+        ORDER BY Payment_Date, Payment_ID;
+
+    -- when the cursor runs out of rows, set v_done instead of raising an error
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
+
+    SELECT Tax_Due, Due_Date INTO v_tax_due, v_due_date
+    FROM tax_record WHERE Tax_ID = p_tax_id;
+
+    IF v_due_date IS NULL OR p_as_of <= v_due_date THEN
+        RETURN 0;                                    -- not late yet
+    END IF;
+
+    SET v_from = v_due_date;
+
+    OPEN pay_cursor;
+    read_loop: LOOP
+        FETCH pay_cursor INTO v_pay_date, v_pay_amount;
+        IF v_done THEN
+            LEAVE read_loop;
+        END IF;
+
+        -- interest on what was unpaid from v_from up to this payment
+        IF v_pay_date > v_from THEN
+            SET v_interest = v_interest
+                + GREATEST(v_tax_due - v_paid, 0) * 18 / 100
+                  * DATEDIFF(v_pay_date, v_from) / 365;
+            SET v_from = v_pay_date;
+        END IF;
+
+        SET v_paid = v_paid + v_pay_amount;
+    END LOOP;
+    CLOSE pay_cursor;
+
+    -- interest on whatever is still unpaid, up to today
+    SET v_interest = v_interest
+        + GREATEST(v_tax_due - v_paid, 0) * 18 / 100
+          * DATEDIFF(p_as_of, v_from) / 365;
+
+    RETURN ROUND(v_interest, 2);
 END //
 
 -- ---------------------------------------------------------------------
