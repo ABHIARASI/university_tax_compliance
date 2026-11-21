@@ -11,6 +11,21 @@
 USE university_tax;
 
 -- ---------------------------------------------------------------------
+-- GST state codes (first two digits of a GSTIN)
+-- ---------------------------------------------------------------------
+INSERT INTO indian_state (State_Code, State_Name) VALUES
+('01','Jammu and Kashmir'), ('02','Himachal Pradesh'), ('03','Punjab'), ('04','Chandigarh'),
+('05','Uttarakhand'), ('06','Haryana'), ('07','Delhi'), ('08','Rajasthan'),
+('09','Uttar Pradesh'), ('10','Bihar'), ('11','Sikkim'), ('12','Arunachal Pradesh'),
+('13','Nagaland'), ('14','Manipur'), ('15','Mizoram'), ('16','Tripura'),
+('17','Meghalaya'), ('18','Assam'), ('19','West Bengal'), ('20','Jharkhand'),
+('21','Odisha'), ('22','Chhattisgarh'), ('23','Madhya Pradesh'), ('24','Gujarat'),
+('26','Dadra and Nagar Haveli and Daman and Diu'), ('27','Maharashtra'), ('29','Karnataka'),
+('30','Goa'), ('31','Lakshadweep'), ('32','Kerala'), ('33','Tamil Nadu'),
+('34','Puducherry'), ('35','Andaman and Nicobar Islands'), ('36','Telangana'),
+('37','Andhra Pradesh'), ('38','Ladakh'), ('97','Other Territory');
+
+-- ---------------------------------------------------------------------
 -- Admin (the tax authority). Password is a bcrypt hash (cost 10).
 --   admin@taxportal.in / Admin@123   -> change it after the first login
 -- ---------------------------------------------------------------------
@@ -27,45 +42,46 @@ INSERT INTO users (Name, Email, Password_Hash, Role, Univ_ID) VALUES
 --             on the university's behalf (the university can claim it back).
 -- ---------------------------------------------------------------------
 INSERT INTO tax_rule
-    (Income_Type, GST_Category, SAC_Code, Tax_Rate, TDS_Rate, Legal_Basis, Conditions)
+    (Income_Type, GST_Category, SAC_Code, Tax_Rate, TDS_Rate, TDS_Threshold, TDS_Threshold_Basis,
+     Special_Rule, Legal_Basis, Conditions)
 VALUES
-('Tuition & Admission Fees', 'EXEMPT', '9992', 0, 0,
+('Tuition & Admission Fees', 'EXEMPT', '9992', 0, 0, 0, 'NONE', 'NONE',
  'GST Notif. 12/2017-CT(Rate), Sl. 66: education by an educational institution to its students',
  'Only for courses that lead to a qualification recognised by law'),
 
-('Examination Fees', 'EXEMPT', '9992', 0, 0,
+('Examination Fees', 'EXEMPT', '9992', 0, 0, 0, 'NONE', 'NONE',
  'GST Notif. 12/2017-CT(Rate), Sl. 66: services relating to exams conducted by the institution',
  'Exams for its own students'),
 
-('Hostel Fees', 'EXEMPT', '9963', 0, 0,
- 'GST Notif. 12/2017-CT(Rate), entry 12AA (from 15 Jul 2024): long-term accommodation',
- 'Up to Rs 20,000 per person per month, stay of at least 90 continuous days'),
+('Hostel Fees', 'EXEMPT', '9963', 0, 0, 0, 'NONE', 'ACCOMMODATION',
+ 'Exempt: Notif. 12/2017-CT(Rate) entry 12AA (from 15 Jul 2024). Otherwise Notif. 15/2025-CT(Rate): 5% / 18%',
+ 'Exempt up to Rs 20,000 per person per month for 90+ days; else 5% up to Rs 7,500 per person per day, 18% above'),
 
-('Government Grants & Subsidies', 'NOT_A_SUPPLY', NULL, 0, 0,
+('Government Grants & Subsidies', 'NOT_A_SUPPLY', NULL, 0, 0, 0, 'NONE', 'NONE',
  'Sec 7 CGST Act: no supply in return; Sec 15(2)(e): govt subsidies excluded from value',
  'UGC / DST / state grant-in-aid with nothing given back to the government'),
 
-('Donations', 'NOT_A_SUPPLY', NULL, 0, 0,
+('Donations', 'NOT_A_SUPPLY', NULL, 0, 0, 0, 'NONE', 'NONE',
  'Sec 7 CGST Act: a gift with no service in return is not a supply',
  'Donor gets no advertising or other benefit in return'),
 
-('Consultancy', 'TAXABLE', '9983', 18, 10,
+('Consultancy', 'TAXABLE', '9983', 18, 10, 50000, 'YEARLY_PER_PAYER', 'NONE',
  'GST 18% (standard rate); TDS 10% professional fees, Sec 393(1) IT Act 2025 (old 194J)',
- 'TDS applies when payments from one client cross Rs 50,000 in a year'),
+ 'TDS only once one client pays more than Rs 50,000 in a financial year'),
 
-('Sponsored Research', 'TAXABLE', '9981', 18, 2,
+('Sponsored Research', 'TAXABLE', '9981', 18, 2, 50000, 'YEARLY_PER_PAYER', 'NONE',
  'GST 18%; TDS 2% technical fees, Sec 393(1) IT Act 2025 (old 194J)',
- 'Research done for a company in return for payment'),
+ 'TDS only once one client pays more than Rs 50,000 in a financial year'),
 
-('Executive Training', 'TAXABLE', '9992', 18, 0,
+('Executive Training', 'TAXABLE', '9992', 18, 0, 0, 'NONE', 'NONE',
  'GST 18%: not covered by the education exemption',
  'Short courses / certificates that do not lead to a recognised degree'),
 
-('Facility Rental', 'TAXABLE', '9972', 18, 10,
+('Facility Rental', 'TAXABLE', '9972', 18, 10, 50000, 'MONTHLY_PER_PAYER', 'NONE',
  'GST 18%; TDS 10% on rent of land/building, Sec 393(1) IT Act 2025 (old 194-I)',
- 'Renting auditoriums, halls, labs to outsiders'),
+ 'TDS only once one tenant pays more than Rs 50,000 in a month'),
 
-('Affiliation Fees', 'TAXABLE', '9992', 18, 0,
+('Affiliation Fees', 'TAXABLE', '9992', 18, 0, 0, 'NONE', 'NONE',
  'CBIC Circular 234/28/2024-GST treats it as taxable at 18%',
  'Disputed: some High Courts held it is a statutory function, not a supply');
 
@@ -91,6 +107,7 @@ INSERT INTO income_source (Source_Name, TaxRule_ID) VALUES
 ('College Affiliation Fees',        10);
 
 -- Quick check
-SELECT 'admin users' AS item, COUNT(*) AS total FROM users
+SELECT 'states' AS item, COUNT(*) AS total FROM indian_state
+UNION ALL SELECT 'admin users', COUNT(*) FROM users
 UNION ALL SELECT 'tax rules',      COUNT(*) FROM tax_rule
 UNION ALL SELECT 'income sources', COUNT(*) FROM income_source;

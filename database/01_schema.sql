@@ -1,13 +1,16 @@
 -- =====================================================================
 -- University Tax Compliance Portal
 -- File: database/01_schema.sql
--- Purpose: creates the database and all 11 tables (structure only, no data)
+-- Purpose: creates the database and all 13 tables (structure only, no data)
 --
 -- Tax model (India):
 --   * Income tax: universities are usually exempt (Sec 10(23C) / 12AB of the
 --     IT Act 1961, renumbered in the IT Act 2025), so the portal mainly tracks GST.
 --   * GST: core education to students = exempt; grants/subsidies/donations = not
 --     a supply; other services = 18%. Tax is split CGST+SGST (same state) or IGST.
+--   * Hostel: exempt up to Rs 20,000 per person per month for 90+ days; otherwise
+--     accommodation GST: 5% up to Rs 7,500 per person per day, 18% above.
+--   * Corrections are made with CREDIT NOTES, never by editing an entry.
 --   * GST is paid monthly; due on the 20th of the next month (GSTR-3B).
 --   * Late payment: interest 18% per year, per day (Sec 50, CGST Act).
 --   * TDS: companies paying for consultancy/research deduct TDS (Sec 393,
@@ -20,6 +23,16 @@
 DROP DATABASE IF EXISTS university_tax;
 CREATE DATABASE university_tax;
 USE university_tax;
+
+-- ---------------------------------------------------------------------
+-- 0. indian_state : official GST state codes (first 2 digits of every GSTIN)
+--    Used to check that a GSTIN's code matches its state, and as the list of
+--    valid states for university address and place of supply.
+-- ---------------------------------------------------------------------
+CREATE TABLE indian_state (
+    State_Code  CHAR(2) PRIMARY KEY,
+    State_Name  VARCHAR(60) NOT NULL UNIQUE
+);
 
 -- ---------------------------------------------------------------------
 -- 1. university : created when a university REGISTERS (status PENDING);
@@ -38,7 +51,7 @@ CREATE TABLE university (
                            'None') NOT NULL DEFAULT 'None',
     Address           VARCHAR(255),
     City              VARCHAR(80),
-    State             VARCHAR(50) NOT NULL,          -- decides CGST+SGST vs IGST
+    State             VARCHAR(60) NOT NULL,          -- decides CGST+SGST vs IGST
     Contact_Person    VARCHAR(100) NOT NULL,
     Phone             VARCHAR(15),
     Email             VARCHAR(120) NOT NULL,
@@ -51,6 +64,8 @@ CREATE TABLE university (
     -- GSTIN format: 2-digit state code + 10-char PAN + entity no. + 'Z' + check char
     -- e.g. 29AABTG4521K1Z3  (29 = Karnataka)
     CHECK (GSTIN REGEXP '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$'),
+    -- the check digit and the state code are verified by a trigger (file 05)
+    FOREIGN KEY (State) REFERENCES indian_state(State_Name),
     INDEX idx_univ_status (Status)
 );
 
@@ -75,8 +90,14 @@ CREATE TABLE tax_rule (
     SAC_Code      VARCHAR(8),                      -- GST service code, e.g. 9992 = education
     Tax_Rate      DECIMAL(5,2) NOT NULL,           -- GST percent (0 or 18)
     TDS_Rate      DECIMAL(5,2) NOT NULL DEFAULT 0, -- % the paying client deducts as TDS
+    TDS_Threshold DECIMAL(15,2) NOT NULL DEFAULT 0,-- no TDS until payments cross this
+    TDS_Threshold_Basis ENUM('NONE', 'YEARLY_PER_PAYER', 'MONTHLY_PER_PAYER')
+                  NOT NULL DEFAULT 'NONE',         -- how the threshold is counted
+    Special_Rule  ENUM('NONE', 'ACCOMMODATION') NOT NULL DEFAULT 'NONE',
+                                                   -- ACCOMMODATION = hostel test (see header)
     Legal_Basis   VARCHAR(255) NOT NULL,           -- which law/notification says so
     Conditions    VARCHAR(255),                    -- when the treatment applies
+    Updated_At    TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CHECK (Tax_Rate BETWEEN 0 AND 100),
     CHECK (TDS_Rate BETWEEN 0 AND 100),
     -- an exempt / non-supply income can never carry GST
@@ -116,29 +137,47 @@ CREATE TABLE users (
 -- ---------------------------------------------------------------------
 -- 6. revenue_transaction : every income entry (an invoice / receipt)
 --    (renamed from `transaction`, because TRANSACTION is a SQL keyword)
+--    Entries are never edited or deleted (triggers block it). A mistake is
+--    corrected with a CREDIT_NOTE that points to the original entry.
 -- ---------------------------------------------------------------------
 CREATE TABLE revenue_transaction (
     Trans_ID          INT AUTO_INCREMENT PRIMARY KEY,
+    Entry_Type        ENUM('INVOICE', 'CREDIT_NOTE') NOT NULL DEFAULT 'INVOICE',
+    Original_Trans_ID INT NULL,                      -- for a CREDIT_NOTE: the entry it reverses
     Trans_Date        DATE NOT NULL,
-    Amount            DECIMAL(15,2) NOT NULL,        -- value BEFORE GST
+    Amount            DECIMAL(15,2) NOT NULL,        -- value BEFORE GST (always positive)
     Mode              ENUM('Cash', 'Bank Transfer', 'Cheque', 'UPI') NOT NULL,
     Dept_ID           INT NOT NULL,
     Source_ID         INT NOT NULL,
+    Reference_No      VARCHAR(50),                   -- invoice / event number (cash rule uses it)
     Payer_Name        VARCHAR(150),                  -- student batch, company, ministry...
     Payer_GSTIN       CHAR(15) NULL,                 -- only for business clients (B2B)
-    Place_Of_Supply   VARCHAR(50) NULL,              -- client's state; NULL = same state
+    Place_Of_Supply   VARCHAR(60) NULL,              -- client's state; NULL = same state
+    Beneficiaries     INT NULL,                      -- hostel: number of students
+    Stay_Days         INT NULL,                      -- hostel: days covered by this fee
+    GST_Rate          DECIMAL(5,2) NOT NULL DEFAULT 0,   -- rate on the day of the entry (snapshot)
     GST_Amount        DECIMAL(15,2) NOT NULL DEFAULT 0,  -- filled by trigger
-    TDS_Deducted      DECIMAL(15,2) NOT NULL DEFAULT 0,  -- filled by trigger from TDS_Rate
+    TDS_Expected      DECIMAL(15,2) NOT NULL DEFAULT 0,  -- what the law says (filled by trigger)
+    TDS_Deducted      DECIMAL(15,2) NULL,                -- type the real figure, or leave empty
+    TDS_Source        ENUM('ENTERED', 'CALCULATED') NOT NULL DEFAULT 'CALCULATED',
     Description       VARCHAR(255),
     Created_By        INT NULL,
     Created_At        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CHECK (Amount > 0),
+    CHECK (Beneficiaries IS NULL OR Beneficiaries > 0),
+    CHECK (Stay_Days IS NULL OR Stay_Days > 0),
+    CHECK (TDS_Deducted IS NULL OR TDS_Deducted >= 0),
+    CHECK ((Entry_Type = 'INVOICE' AND Original_Trans_ID IS NULL)
+        OR (Entry_Type = 'CREDIT_NOTE' AND Original_Trans_ID IS NOT NULL)),
     CHECK (Payer_GSTIN IS NULL OR
            Payer_GSTIN REGEXP '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$'),
+    FOREIGN KEY (Original_Trans_ID) REFERENCES revenue_transaction(Trans_ID),
+    FOREIGN KEY (Place_Of_Supply) REFERENCES indian_state(State_Name),
     FOREIGN KEY (Dept_ID)    REFERENCES department(Dept_ID),
     FOREIGN KEY (Source_ID)  REFERENCES income_source(Source_ID),
     FOREIGN KEY (Created_By) REFERENCES users(User_ID),
-    INDEX idx_trans_date (Trans_Date)              -- dashboards group by month
+    INDEX idx_trans_date (Trans_Date),                  -- dashboards group by month
+    INDEX idx_payer_date (Payer_Name, Trans_Date)       -- cash-limit and TDS look-ups
 );
 
 -- ---------------------------------------------------------------------
@@ -161,18 +200,21 @@ CREATE TABLE tax_record (
     IGST            DECIMAL(15,2) NOT NULL DEFAULT 0,  -- integrated   (other-state sales)
     Tax_Due         DECIMAL(15,2) NOT NULL DEFAULT 0,  -- CGST + SGST + IGST
     Tax_Paid        DECIMAL(15,2) NOT NULL DEFAULT 0,  -- GST actually paid (admin-verified)
-    Due_Date        DATE,                              -- 20th of next month (set by trigger)
+    Interest_Paid   DECIMAL(15,2) NOT NULL DEFAULT 0,  -- late-payment interest paid (verified)
+    Due_Date        DATE,                              -- 20th of next month (set by trigger);
+                                                       -- admin can extend it (govt extensions)
     UNIQUE (Univ_ID, Period_Start),                    -- stops duplicate bills
     CHECK (DAY(Period_Start) = 1),
     FOREIGN KEY (Univ_ID) REFERENCES university(Univ_ID)
 );
 
 -- ---------------------------------------------------------------------
--- 8. payment : a university pays a monthly bill; admin verifies it
+-- 8. payment : a university pays a monthly bill (tax or interest); admin verifies it
 -- ---------------------------------------------------------------------
 CREATE TABLE payment (
     Payment_ID    INT AUTO_INCREMENT PRIMARY KEY,
     Tax_ID        INT NOT NULL,
+    Payment_For   ENUM('Tax', 'Interest') NOT NULL DEFAULT 'Tax',  -- separate heads, like a GST challan
     Amount        DECIMAL(15,2) NOT NULL,
     Payment_Date  DATE NOT NULL,
     Mode          ENUM('Net Banking', 'NEFT/RTGS', 'UPI', 'Card', 'Over the Counter') NOT NULL,
@@ -216,7 +258,7 @@ CREATE TABLE anomaly (
     Univ_ID      INT NOT NULL,
     Trans_ID     INT NULL,                         -- set for transaction-based rules
     Payment_ID   INT NULL,                         -- set for payment-based rules
-    Rule_Code    ENUM('CASH_LIMIT', 'SPIKE', 'DUPLICATE', 'OVERPAYMENT') NOT NULL,
+    Rule_Code    ENUM('CASH_LIMIT', 'SPIKE', 'DUPLICATE', 'OVERPAYMENT', 'TDS_MISMATCH') NOT NULL,
     Severity     ENUM('Low', 'Medium', 'High') NOT NULL,
     Details      VARCHAR(255) NOT NULL,
     Status       ENUM('Open', 'Reviewed', 'Dismissed') NOT NULL DEFAULT 'Open',
@@ -232,16 +274,17 @@ CREATE TABLE anomaly (
 -- 11. alert : AUTOMATIC reminders created every day by a scheduled job
 --     7, 3 and 1 day before the due date -> DUE_SOON
 --     on the due date                    -> DUE_TODAY
---     every day after, until fully paid  -> OVERDUE (with interest so far)
+--     every day after, until tax is paid -> OVERDUE (with interest so far)
+--     tax paid but interest still unpaid -> INTEREST_DUE, every day until paid
 -- ---------------------------------------------------------------------
 CREATE TABLE alert (
     Alert_ID      INT AUTO_INCREMENT PRIMARY KEY,
     Univ_ID       INT NOT NULL,
     Tax_ID        INT NOT NULL,
-    Alert_Type    ENUM('DUE_SOON', 'DUE_TODAY', 'OVERDUE') NOT NULL,
+    Alert_Type    ENUM('DUE_SOON', 'DUE_TODAY', 'OVERDUE', 'INTEREST_DUE') NOT NULL,
     Alert_Date    DATE NOT NULL,                   -- the day this alert is for
-    Outstanding   DECIMAL(15,2) NOT NULL,          -- Tax_Due - Tax_Paid on that day
-    Interest      DECIMAL(15,2) NOT NULL DEFAULT 0,  -- 18% p.a. interest so far
+    Outstanding   DECIMAL(15,2) NOT NULL,          -- GST still unpaid on that day
+    Interest      DECIMAL(15,2) NOT NULL DEFAULT 0,  -- interest still unpaid on that day
     Message       VARCHAR(255) NOT NULL,
     Is_Read       BOOLEAN NOT NULL DEFAULT FALSE,
     Email_Sent    BOOLEAN NOT NULL DEFAULT FALSE,
@@ -249,6 +292,24 @@ CREATE TABLE alert (
     UNIQUE (Tax_ID, Alert_Date),                   -- at most ONE alert per bill per day
     FOREIGN KEY (Univ_ID) REFERENCES university(Univ_ID),
     FOREIGN KEY (Tax_ID)  REFERENCES tax_record(Tax_ID)
+);
+
+-- ---------------------------------------------------------------------
+-- 12. tax_rule_audit : history of every change to a tax rate (filled by trigger)
+--     Who changed what, when. Old entries keep their own GST_Rate snapshot,
+--     so a rate change only affects NEW income - exactly like real GST.
+-- ---------------------------------------------------------------------
+CREATE TABLE tax_rule_audit (
+    Audit_ID      INT AUTO_INCREMENT PRIMARY KEY,
+    TaxRule_ID    INT NOT NULL,
+    Old_Tax_Rate  DECIMAL(5,2),
+    New_Tax_Rate  DECIMAL(5,2),
+    Old_TDS_Rate  DECIMAL(5,2),
+    New_TDS_Rate  DECIMAL(5,2),
+    Changed_By    INT NULL,                        -- taken from @app_user_id set by the backend
+    Changed_At    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (TaxRule_ID) REFERENCES tax_rule(TaxRule_ID),
+    FOREIGN KEY (Changed_By) REFERENCES users(User_ID)
 );
 
 -- These foreign keys point "backwards" to tables created later, so they are added last
