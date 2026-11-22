@@ -22,3 +22,6 @@ Thumbs.db
 
 # Test coverage
 coverage/
+
+# Python cache (database/tools)
+__pycache__/

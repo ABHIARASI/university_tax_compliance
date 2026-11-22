@@ -1,7 +1,7 @@
 -- =====================================================================
 -- University Tax Compliance Portal
 -- File: database/01_schema.sql
--- Purpose: creates the database and all 13 tables (structure only, no data)
+-- Purpose: creates the database and all 14 tables (structure only, no data)
 --
 -- Tax model (India):
 --   * Income tax: universities are usually exempt (Sec 10(23C) / 12AB of the
@@ -57,13 +57,13 @@ CREATE TABLE university (
     Email             VARCHAR(120) NOT NULL,
     Status            ENUM('PENDING', 'APPROVED', 'REJECTED', 'SUSPENDED')
                       NOT NULL DEFAULT 'PENDING',
-    Rejection_Reason  VARCHAR(255),
+    Status_Reason     VARCHAR(255),                  -- why it was rejected / suspended
     Reviewed_By       INT NULL,                      -- admin who approved/rejected (FK added at the end)
     Reviewed_At       TIMESTAMP NULL,
     Registered_At     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     -- GSTIN format: 2-digit state code + 10-char PAN + entity no. + 'Z' + check char
     -- e.g. 29AABTG4521K1Z3  (29 = Karnataka)
-    CHECK (GSTIN REGEXP '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$'),
+    CONSTRAINT chk_gstin_format CHECK (GSTIN REGEXP '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$'),
     -- the check digit and the state code are verified by a trigger (file 05)
     FOREIGN KEY (State) REFERENCES indian_state(State_Name),
     INDEX idx_univ_status (Status)
@@ -98,10 +98,10 @@ CREATE TABLE tax_rule (
     Legal_Basis   VARCHAR(255) NOT NULL,           -- which law/notification says so
     Conditions    VARCHAR(255),                    -- when the treatment applies
     Updated_At    TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CHECK (Tax_Rate BETWEEN 0 AND 100),
-    CHECK (TDS_Rate BETWEEN 0 AND 100),
+    CONSTRAINT chk_tax_rate_range CHECK (Tax_Rate BETWEEN 0 AND 100),
+    CONSTRAINT chk_tds_rate_range CHECK (TDS_Rate BETWEEN 0 AND 100),
     -- an exempt / non-supply income can never carry GST
-    CHECK (GST_Category = 'TAXABLE' OR Tax_Rate = 0)
+    CONSTRAINT chk_exempt_no_gst CHECK (GST_Category = 'TAXABLE' OR Tax_Rate = 0)
 );
 
 -- ---------------------------------------------------------------------
@@ -126,12 +126,13 @@ CREATE TABLE users (
     Password_Hash  VARCHAR(255) NOT NULL,          -- bcrypt hash, never the real password
     Role           ENUM('ADMIN', 'UNIVERSITY') NOT NULL,
     Univ_ID        INT NULL,                       -- filled only for UNIVERSITY users
+    Token_Version  INT NOT NULL DEFAULT 0,         -- +1 on password change = old logins stop working
     Last_Login     TIMESTAMP NULL,
     Created_At     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (Univ_ID) REFERENCES university(Univ_ID),
     -- a university user must belong to a university; an admin must not
-    CHECK ( (Role = 'UNIVERSITY' AND Univ_ID IS NOT NULL)
-         OR (Role = 'ADMIN'      AND Univ_ID IS NULL) )
+    CONSTRAINT chk_user_role_univ CHECK ( (Role = 'UNIVERSITY' AND Univ_ID IS NOT NULL)
+                                       OR (Role = 'ADMIN'      AND Univ_ID IS NULL) )
 );
 
 -- ---------------------------------------------------------------------
@@ -163,13 +164,13 @@ CREATE TABLE revenue_transaction (
     Description       VARCHAR(255),
     Created_By        INT NULL,
     Created_At        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CHECK (Amount > 0),
-    CHECK (Beneficiaries IS NULL OR Beneficiaries > 0),
-    CHECK (Stay_Days IS NULL OR Stay_Days > 0),
-    CHECK (TDS_Deducted IS NULL OR TDS_Deducted >= 0),
-    CHECK ((Entry_Type = 'INVOICE' AND Original_Trans_ID IS NULL)
+    CONSTRAINT chk_trans_amount CHECK (Amount > 0),
+    CONSTRAINT chk_beneficiaries CHECK (Beneficiaries IS NULL OR Beneficiaries > 0),
+    CONSTRAINT chk_stay_days CHECK (Stay_Days IS NULL OR Stay_Days > 0),
+    CONSTRAINT chk_tds_not_negative CHECK (TDS_Deducted IS NULL OR TDS_Deducted >= 0),
+    CONSTRAINT chk_credit_note_link CHECK ((Entry_Type = 'INVOICE' AND Original_Trans_ID IS NULL)
         OR (Entry_Type = 'CREDIT_NOTE' AND Original_Trans_ID IS NOT NULL)),
-    CHECK (Payer_GSTIN IS NULL OR
+    CONSTRAINT chk_payer_gstin CHECK (Payer_GSTIN IS NULL OR
            Payer_GSTIN REGEXP '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$'),
     FOREIGN KEY (Original_Trans_ID) REFERENCES revenue_transaction(Trans_ID),
     FOREIGN KEY (Place_Of_Supply) REFERENCES indian_state(State_Name),
@@ -204,7 +205,7 @@ CREATE TABLE tax_record (
     Due_Date        DATE,                              -- 20th of next month (set by trigger);
                                                        -- admin can extend it (govt extensions)
     UNIQUE (Univ_ID, Period_Start),                    -- stops duplicate bills
-    CHECK (DAY(Period_Start) = 1),
+    CONSTRAINT chk_period_first_day CHECK (DAY(Period_Start) = 1),
     FOREIGN KEY (Univ_ID) REFERENCES university(Univ_ID)
 );
 
@@ -223,7 +224,7 @@ CREATE TABLE payment (
     Verified_By   INT NULL,
     Verified_At   TIMESTAMP NULL,
     Remarks       VARCHAR(255),
-    CHECK (Amount > 0),
+    CONSTRAINT chk_payment_amount CHECK (Amount > 0),
     FOREIGN KEY (Tax_ID)      REFERENCES tax_record(Tax_ID),
     FOREIGN KEY (Verified_By) REFERENCES users(User_ID)
 );
@@ -310,6 +311,21 @@ CREATE TABLE tax_rule_audit (
     Changed_At    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (TaxRule_ID) REFERENCES tax_rule(TaxRule_ID),
     FOREIGN KEY (Changed_By) REFERENCES users(User_ID)
+);
+
+-- ---------------------------------------------------------------------
+-- 13. password_reset : one-time "forgot password" tokens
+--     Only a HASH of the token is stored (like a password), so a database
+--     leak can't be used to reset anyone's password. Valid 30 minutes, once.
+-- ---------------------------------------------------------------------
+CREATE TABLE password_reset (
+    Reset_ID     INT AUTO_INCREMENT PRIMARY KEY,
+    User_ID      INT NOT NULL,
+    Token_Hash   CHAR(64) NOT NULL UNIQUE,         -- SHA-256 of the token, in hex
+    Expires_At   DATETIME NOT NULL,
+    Used_At      DATETIME NULL,
+    Created_At   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (User_ID) REFERENCES users(User_ID) ON DELETE CASCADE
 );
 
 -- These foreign keys point "backwards" to tables created later, so they are added last

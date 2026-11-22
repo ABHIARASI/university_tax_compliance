@@ -2,7 +2,7 @@
 -- University Tax Compliance Portal
 -- File: database/02_seed.sql
 -- Purpose: the data the app needs on day one:
---          the admin login, the Indian tax rules and the income sources.
+--          state codes, the admin login, the Indian tax rules and income sources.
 --          NO universities here: universities REGISTER themselves in the app
 --          and the admin approves them.
 -- Run (inside mysql):  SOURCE database/02_seed.sql;
@@ -26,8 +26,12 @@ INSERT INTO indian_state (State_Code, State_Name) VALUES
 ('37','Andhra Pradesh'), ('38','Ladakh'), ('97','Other Territory');
 
 -- ---------------------------------------------------------------------
--- Admin (the tax authority). Password is a bcrypt hash (cost 10).
---   admin@taxportal.in / Admin@123   -> change it after the first login
+-- The tax office ADMIN. Password is stored only as a bcrypt hash (cost 10).
+--   admin@taxportal.in / Admin@123
+--   -> change it after the first login (Settings -> Change password).
+--   More admins: from the app (Admin -> Tools), or `npm run create-admin`.
+-- Universities are NOT created here: each one registers in the app and
+-- chooses its own password.
 -- ---------------------------------------------------------------------
 INSERT INTO users (Name, Email, Password_Hash, Role, Univ_ID) VALUES
 ('Tax Officer', 'admin@taxportal.in',

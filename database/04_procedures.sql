@@ -206,7 +206,7 @@ BEGIN
 
     UPDATE university
     SET Status = 'APPROVED', Reviewed_By = p_admin_id, Reviewed_At = NOW(),
-        Rejection_Reason = NULL
+        Status_Reason = NULL
     WHERE Univ_ID = p_univ_id;
 
     -- every university starts with these two departments; it can add more
@@ -239,7 +239,7 @@ BEGIN
     END IF;
 
     UPDATE university
-    SET Status = 'REJECTED', Rejection_Reason = p_reason,
+    SET Status = 'REJECTED', Status_Reason = p_reason,
         Reviewed_By = p_admin_id, Reviewed_At = NOW()
     WHERE Univ_ID = p_univ_id;
 END //

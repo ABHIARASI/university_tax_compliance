@@ -11,16 +11,22 @@
 --   Hillcrest University  (Tamil Nadu) - always on time -> COMPLIANT
 --   Northstar, Lakeview                - registered, waiting for admin approval
 --
---   Logins (demo only - every university uses the same password here):
+--   OPTIONAL. Sample universities for a local demo only - skip this file
+--   for a real setup (real universities register in the app themselves).
+--   Demo logins:
+--     admin@taxportal.in        / Admin@123   (from 02_seed.sql)
 --     finance@greenfield.edu.in / Univ@123
 --     finance@riverside.edu.in  / Univ@123
 --     finance@hillcrest.edu.in  / Univ@123
---     admin@taxportal.in        / Admin@123
+--   Real universities register through the app with their own passwords.
 --
 -- Run (inside mysql):  SOURCE database/06_demo_data.sql;
 -- =====================================================================
 
 USE university_tax;
+
+-- the admin from 02_seed.sql does the approvals and verifications below
+SET @admin = (SELECT User_ID FROM users WHERE Email = 'admin@taxportal.in');
 
 -- ---------------------------------------------------------------------
 -- 1. Universities register (status PENDING)
@@ -54,9 +60,9 @@ FROM university;
 -- ---------------------------------------------------------------------
 -- 2. Admin approves the first three (creates Administration + Accounts)
 -- ---------------------------------------------------------------------
-CALL Approve_University(1, 1);
-CALL Approve_University(2, 1);
-CALL Approve_University(3, 1);
+CALL Approve_University(1, @admin);
+CALL Approve_University(2, @admin);
+CALL Approve_University(3, @admin);
 UPDATE university SET Reviewed_At = '2025-03-20 12:00:00' WHERE Univ_ID IN (1, 2, 3);
 
 -- ---------------------------------------------------------------------
@@ -465,7 +471,7 @@ BEGIN
     l: LOOP
         FETCH c INTO v_id;
         IF v_done THEN LEAVE l; END IF;
-        CALL Verify_Payment(v_id, 1, 'Verified', 'Matched with bank statement');
+        CALL Verify_Payment(v_id, @admin, 'Verified', 'Matched with bank statement');
     END LOOP;
     CLOSE c;
 END //
@@ -478,7 +484,7 @@ INSERT INTO payment (Tax_ID, Payment_For, Amount, Payment_Date, Mode, Reference_
 SELECT Tax_ID, 'Interest', Calculate_Bill_Interest(Tax_ID, Due_Date + INTERVAL 15 DAY),
        Due_Date + INTERVAL 15 DAY, 'NEFT/RTGS', 'CIN12601I'
 FROM tax_record WHERE Univ_ID = 1 AND Period_Start = '2026-01-01';
-CALL Verify_Payment(LAST_INSERT_ID(), 1, 'Verified', 'Interest for 12 days late');
+CALL Verify_Payment(LAST_INSERT_ID(), @admin, 'Verified', 'Interest for 12 days late');
 
 -- ---------------------------------------------------------------------
 -- 6. Alerts history: run the daily job for every day of the last 60 days
@@ -503,14 +509,14 @@ DROP PROCEDURE Demo_Alert_History;
 INSERT INTO notice (Univ_ID, Tax_ID, Type, Subject, Message, Issued_By, Response_Due)
 SELECT 2, MIN(Tax_ID), 'Demand', 'GST unpaid since July 2026',
        'Our records show GST for July 2026 onwards is unpaid. Please pay the outstanding tax with interest under Section 50 of the CGST Act, or explain the delay.',
-       1, CURDATE() + INTERVAL 7 DAY
+       @admin, CURDATE() + INTERVAL 7 DAY
 FROM tax_record WHERE Univ_ID = 2 AND Period_Start >= '2026-07-01';
 
 INSERT INTO notice (Univ_ID, Anomaly_ID, Type, Subject, Message, Issued_By, Response_Due,
                     Status, Response, Responded_At)
 SELECT Univ_ID, Anomaly_ID, 'Anomaly Query', 'Cash receipt above Rs 2 lakh',
        'A cash receipt of Rs 2,50,000 was recorded on 12 Dec 2025. Receiving Rs 2 lakh or more in cash is not allowed. Please explain.',
-       1, '2026-01-10', 'Responded',
+       @admin, '2026-01-10', 'Responded',
        'The event company paid in cash at the venue. We have informed them that future payments must be by bank transfer.',
        '2026-01-05 15:20:00'
 FROM anomaly WHERE Univ_ID = 1 AND Rule_Code = 'CASH_LIMIT' LIMIT 1;
